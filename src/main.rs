@@ -5,6 +5,8 @@
 #![no_main]
 // https://docs.rust-embedded.org/discovery/microbit/04-meet-your-hardware/terminology.html
 
+mod picoDisplay;
+
 use arrform::{arrform, ArrForm}; // embedded alternative to format!()
 use bsp::entry;
 use cortex_m::delay::Delay;
@@ -14,7 +16,7 @@ use embedded_hal::{
     adc::OneShot,
     digital::v2::{InputPin, OutputPin, ToggleableOutputPin},
 };
-use embedded_time::fixed_point::FixedPoint;
+use embedded_time::{fixed_point::FixedPoint, rate::Extensions};
 use panic_probe as _;
 use rp_pico as bsp; // Provide an alias for our BSP so we can switch targets quickly.
 use usb_device::{class_prelude::*, prelude::*}; // USB Device support
@@ -22,25 +24,49 @@ use usbd_serial::SerialPort; // USB Communications Class Device support
 
 use bsp::hal::{
     clocks::{init_clocks_and_plls, Clock},
+    gpio,
     multicore::{Multicore, Stack},
     pac,
     sio::Sio,
+    spi::Spi,
     usb,
     watchdog::Watchdog,
     Adc, Timer,
 };
 
-//**************Multi-core****/
+//**************SETUP DISPLAY**********/
+use crate::picoDisplay::PicoDisplay;
+// use display_interface::WriteOnlyDataCommand;
+use display_interface_spi::SPIInterfaceNoCS;
+use embedded_graphics::{
+    draw_target::DrawTarget,
+    image::Image,
+    prelude::Point,
+    primitives::{Primitive, PrimitiveStyleBuilder, Rectangle},
+    transform::Transform,
+};
+use embedded_graphics::{image::ImageRawLE, pixelcolor::*};
+use embedded_graphics::{
+    prelude::{RgbColor, Size},
+    Drawable,
+};
+use mipidsi::{models::*, ColorOrder, NoPin, Orientation};
+use mipidsi::{Display, DisplayOptions};
+type DisplayRgb = Rgb565;
+// type DisplayRgb = Bgr565;
+// type DisplayModel = ST7789;
+
+//**************Multi-core*************/
 /// External high-speed crystal on the Raspberry Pi Pico board is 12 MHz. Adjust
 /// if your board has a different frequency
 const XTAL_FREQ_HZ: u32 = 12_000_000u32;
 
 /// The frequency at which core 0 will blink its LED (Hz).
-const CORE0_FREQ: u32 = 3;
+// const CORE0_FREQ: u32 = 3;
 /// The frequency at which core 1 will blink its LED (Hz).
 const CORE1_FREQ: u32 = 4;
 /// The delay between each toggle of core 0's LED (us).
-const CORE0_DELAY: u32 = 1_000_000 / CORE0_FREQ;
+// const CORE0_DELAY: u32 = 1_000_000 / CORE0_FREQ;
 /// The delay between each toggle of core 1's LED (us).
 const CORE1_DELAY: u32 = 1_000_000 / CORE1_FREQ;
 /// Stack for core 1
@@ -54,7 +80,7 @@ fn main() -> ! {
     let core = pac::CorePeripherals::take().unwrap();
     let mut watchdog = Watchdog::new(pac.WATCHDOG);
 
-    // Configure the clocks
+    //********SETUP CLOCKS***********/
     let clocks = init_clocks_and_plls(
         XTAL_FREQ_HZ,
         pac.XOSC,
@@ -67,6 +93,8 @@ fn main() -> ! {
     .ok()
     .unwrap();
     let timer = Timer::new(pac.TIMER, &mut pac.RESETS);
+    let sys_freq = clocks.system_clock.freq().integer();
+    let mut delay = Delay::new(core.SYST, sys_freq);
 
     //****************SETUP USB BUS***************/
     // Set up the USB driver
@@ -103,11 +131,50 @@ fn main() -> ! {
     // Enable ADC
     let mut adc = Adc::new(pac.ADC, &mut pac.RESETS);
     let mut temperature_sensor = adc.enable_temp_sensor();
+    //***************SET UP DISPLAY*************/
+    //***********INIT SPI PINS TO BE USED UNDER THE HOOD BY DISPLAY**********/
+    // These are implicitly used by the spi driver if they are in the correct mode
+    let _spi_sclk = pins.gpio18.into_mode::<gpio::FunctionSpi>();
+    let _spi_mosi = pins.gpio19.into_mode::<gpio::FunctionSpi>();
+    let spi_dc = pins.gpio16.into_push_pull_output();
+    let _spi_cs = pins.gpio17.into_mode::<gpio::FunctionSpi>();
+    let spi = Spi::<_, _, 8>::new(pac.SPI0);
+
+    // Exchange the uninitialised SPI driver for an initialised one
+    let mut spi = spi.init(
+        &mut pac.RESETS,
+        clocks.peripheral_clock.freq(),
+        16_000_000u32.Hz(),
+        &embedded_hal::spi::MODE_0,
+    );
+    let di = SPIInterfaceNoCS::new(spi, spi_dc);
+    let mut display: Display<SPIInterfaceNoCS<Spi<_, _, 8_u8>, _>, NoPin, _> =
+        Display::with_model(di, None, PicoDisplay::new());
+    display.init(&mut delay, DisplayOptions::default()).unwrap();
+    // clear the display to black
+    display.clear(DisplayRgb::BLACK).unwrap();
+    display
+        .set_orientation(Orientation::Portrait(true))
+        .unwrap();
+    let raw_image_data = ImageRawLE::new(include_bytes!("../assets/ferris.raw"), 86);
+    // let ferris = Image::new(&raw_image_data, Point::new(34, 8));
+    let ferris = Image::new(&raw_image_data, Point::new(75, 55));
+    ferris.draw(&mut display).unwrap();
+
+    // Rectangle with red 3 pixel wide stroke and green fill with the top left corner at (30, 20) and
+    // a size of (10, 15)
+    let style = PrimitiveStyleBuilder::new()
+        .stroke_color(Rgb565::CSS_DARK_RED)
+        .stroke_width(3)
+        .fill_color(Rgb565::CSS_CRIMSON)
+        .build();
+    Rectangle::new(Point::new(53, 40), Size::new(135, 240 - 90))
+        .translate(Point { x: 0, y: 90 })
+        .into_styled(style)
+        .draw(&mut display)
+        .unwrap();
 
     //***************SET UP CORES*************/
-    let sys_freq = clocks.system_clock.freq().integer();
-    // CORE 0
-    let mut delay = Delay::new(core.SYST, sys_freq);
     // CORE 1
     let mut mc = Multicore::new(&mut pac.PSM, &mut pac.PPB, &mut sio.fifo);
     let core1 = &mut mc.cores()[1];
@@ -141,16 +208,15 @@ fn main() -> ! {
         };
         // Read the raw ADC counts from the temperature sensor channel.
         let temp_sens_adc_counts: u16 = adc.read(&mut temperature_sensor).unwrap();
-        let pin_adc_counts: u16 = adc.read(&mut adc_pin_0).unwrap();
+        // let pin_adc_counts: u16 = adc.read(&mut adc_pin_0).unwrap();
         let button_a: u16 = if sw_a.is_low().unwrap() { 1 } else { 0 };
         let mut buf = [0u8; 64];
-        // Send back to the host
-        // let mut wr_ptr = &buf[..64];
+
         arrform!(
             64,
-            "Temp:{:02} Pin: {:02} A: {:02}\r\n",
+            "T:{} {} A: {}\r\n",
             temp_sens_adc_counts,
-            pin_adc_counts,
+            cal_temp(temp_sens_adc_counts),
             button_a,
         )
         .as_bytes()
@@ -172,6 +238,13 @@ fn main() -> ! {
             };
         }
     }
+}
+
+fn cal_temp(adc_count: u16) -> u16 {
+    // T = 27 - (ADC_voltage - 0.706)/0.001721
+    let voltage: f32 = (adc_count as f32) * 0.000805664; // 12bit adc at 3.3v
+    let temperature = 27.0 - (voltage - 0.706) / 0.001721;
+    temperature as u16
 }
 
 // End of file
