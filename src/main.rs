@@ -5,7 +5,7 @@
 #![no_main]
 // https://docs.rust-embedded.org/discovery/microbit/04-meet-your-hardware/terminology.html
 
-mod picoDisplay;
+mod pico_graphics;
 
 use arrform::{arrform, ArrForm}; // embedded alternative to format!()
 use bsp::entry;
@@ -14,7 +14,7 @@ use defmt::*;
 use defmt_rtt as _;
 use embedded_hal::{
     adc::OneShot,
-    digital::v2::{InputPin, OutputPin, ToggleableOutputPin},
+    digital::v2::{InputPin, ToggleableOutputPin},
 };
 use embedded_time::{fixed_point::FixedPoint, rate::Extensions};
 use panic_probe as _;
@@ -35,14 +35,15 @@ use bsp::hal::{
 };
 
 //**************SETUP DISPLAY**********/
-use crate::picoDisplay::PicoDisplay;
-// use display_interface::WriteOnlyDataCommand;
+use crate::pico_graphics::pico_display::PicoDisplay;
 use display_interface_spi::SPIInterfaceNoCS;
 use embedded_graphics::{
     draw_target::DrawTarget,
     image::Image,
+    mono_font::{ascii::FONT_6X10, MonoTextStyle},
     prelude::Point,
     primitives::{Primitive, PrimitiveStyleBuilder, Rectangle},
+    text::Text,
     transform::Transform,
 };
 use embedded_graphics::{image::ImageRawLE, pixelcolor::*};
@@ -50,11 +51,9 @@ use embedded_graphics::{
     prelude::{RgbColor, Size},
     Drawable,
 };
-use mipidsi::{models::*, ColorOrder, NoPin, Orientation};
+use mipidsi::{models::*, NoPin, Orientation};
 use mipidsi::{Display, DisplayOptions};
 type DisplayRgb = Rgb565;
-// type DisplayRgb = Bgr565;
-// type DisplayModel = ST7789;
 
 //**************Multi-core*************/
 /// External high-speed crystal on the Raspberry Pi Pico board is 12 MHz. Adjust
@@ -97,7 +96,6 @@ fn main() -> ! {
     let mut delay = Delay::new(core.SYST, sys_freq);
 
     //****************SETUP USB BUS***************/
-    // Set up the USB driver
     let usb_bus = UsbBusAllocator::new(usb::UsbBus::new(
         pac.USBCTRL_REGS,
         pac.USBCTRL_DPRAM,
@@ -126,13 +124,18 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
     let mut led_pin = pins.led.into_push_pull_output();
-    let mut adc_pin_0 = pins.gpio26.into_floating_input();
-    let sw_a = pins.gpio12.into_pull_up_input();
+    // let mut adc_pin_0 = pins.gpio26.into_floating_input();
+    let sw = (
+        pins.gpio12.into_pull_up_input(),
+        pins.gpio13.into_pull_up_input(),
+        pins.gpio14.into_pull_up_input(),
+        pins.gpio15.into_pull_up_input(),
+    );
     // Enable ADC
     let mut adc = Adc::new(pac.ADC, &mut pac.RESETS);
     let mut temperature_sensor = adc.enable_temp_sensor();
     //***************SET UP DISPLAY*************/
-    //***********INIT SPI PINS TO BE USED UNDER THE HOOD BY DISPLAY**********/
+    // INIT SPI PINS TO BE USED UNDER THE HOOD BY DISPLAY
     // These are implicitly used by the spi driver if they are in the correct mode
     let _spi_sclk = pins.gpio18.into_mode::<gpio::FunctionSpi>();
     let _spi_mosi = pins.gpio19.into_mode::<gpio::FunctionSpi>();
@@ -141,38 +144,12 @@ fn main() -> ! {
     let spi = Spi::<_, _, 8>::new(pac.SPI0);
 
     // Exchange the uninitialised SPI driver for an initialised one
-    let mut spi = spi.init(
+    let spi = spi.init(
         &mut pac.RESETS,
         clocks.peripheral_clock.freq(),
         16_000_000u32.Hz(),
         &embedded_hal::spi::MODE_0,
     );
-    let di = SPIInterfaceNoCS::new(spi, spi_dc);
-    let mut display: Display<SPIInterfaceNoCS<Spi<_, _, 8_u8>, _>, NoPin, _> =
-        Display::with_model(di, None, PicoDisplay::new());
-    display.init(&mut delay, DisplayOptions::default()).unwrap();
-    // clear the display to black
-    display.clear(DisplayRgb::BLACK).unwrap();
-    display
-        .set_orientation(Orientation::Portrait(true))
-        .unwrap();
-    let raw_image_data = ImageRawLE::new(include_bytes!("../assets/ferris.raw"), 86);
-    // let ferris = Image::new(&raw_image_data, Point::new(34, 8));
-    let ferris = Image::new(&raw_image_data, Point::new(75, 55));
-    ferris.draw(&mut display).unwrap();
-
-    // Rectangle with red 3 pixel wide stroke and green fill with the top left corner at (30, 20) and
-    // a size of (10, 15)
-    let style = PrimitiveStyleBuilder::new()
-        .stroke_color(Rgb565::CSS_DARK_RED)
-        .stroke_width(3)
-        .fill_color(Rgb565::CSS_CRIMSON)
-        .build();
-    Rectangle::new(Point::new(53, 40), Size::new(135, 240 - 90))
-        .translate(Point { x: 0, y: 90 })
-        .into_styled(style)
-        .draw(&mut display)
-        .unwrap();
 
     //***************SET UP CORES*************/
     // CORE 1
@@ -186,9 +163,65 @@ fn main() -> ! {
             let core = unsafe { pac::CorePeripherals::steal() };
             // Set up the delay for the second core.
             let mut delay = Delay::new(core.SYST, sys_freq);
+            let di = SPIInterfaceNoCS::new(spi, spi_dc);
+            const ORIGIN: Point = Point { x: 53, y: 40 }; //NOTE origin offset for Pico Display
+            let mut display: Display<SPIInterfaceNoCS<Spi<_, _, 8_u8>, _>, NoPin, _> =
+                Display::with_model(di, None, PicoDisplay::new());
+            display.init(&mut delay, DisplayOptions::default()).unwrap();
+            // clear the display to black
+            display.clear(DisplayRgb::BLACK).unwrap();
+            display
+                .set_orientation(Orientation::Portrait(false))
+                .unwrap();
+            let raw_image_data = ImageRawLE::new(include_bytes!("../assets/ferris.raw"), 86);
+
+            Image::new(&raw_image_data, Point::new(ORIGIN.x, ORIGIN.y))
+                .translate(Point { x: 22, y: 15 })
+                .draw(&mut display)
+                .unwrap();
             // Blink the second LED.
+            let style = PrimitiveStyleBuilder::new()
+                .stroke_color(Rgb565::CSS_DARK_RED)
+                .stroke_width(3)
+                .fill_color(Rgb565::CSS_CRIMSON)
+                .build();
+            Rectangle::new(Point::new(ORIGIN.x, ORIGIN.y), Size::new(135, 240 - 90))
+                .translate(Point { x: 0, y: 90 })
+                .into_styled(style)
+                .draw(&mut display)
+                .unwrap();
+
+            let mut style = MonoTextStyle::new(&FONT_6X10, Rgb565::WHITE);
+            style.background_color = Some(Rgb565::CSS_CRIMSON);
+            Text::new("Hello from Rust!", Point::new(ORIGIN.x, ORIGIN.y), style)
+                .translate(Point { x: 5, y: 110 })
+                .draw(&mut display)
+                .unwrap();
+            fn to_int(b: bool) -> u16 {
+                if b {
+                    1
+                } else {
+                    0
+                }
+            }
             loop {
+                let btns: [u16; 4] = [
+                    to_int(sw.0.is_low().unwrap()),
+                    to_int(sw.1.is_low().unwrap()),
+                    to_int(sw.2.is_low().unwrap()),
+                    to_int(sw.3.is_low().unwrap()),
+                ];
                 led_pin.toggle().unwrap();
+                let mut buf2 = [0u8; 32];
+                let text = format_no_std::show(
+                    &mut buf2,
+                    format_args!("A:{}, B:{}, X:{}, Y:{}", btns[0], btns[1], btns[2], btns[3]),
+                )
+                .unwrap();
+                Text::new(text, Point::new(ORIGIN.x, ORIGIN.y), style)
+                    .translate(Point { x: 5, y: 120 })
+                    .draw(&mut display)
+                    .unwrap();
                 delay.delay_us(CORE1_DELAY)
             }
         })
@@ -209,27 +242,25 @@ fn main() -> ! {
         // Read the raw ADC counts from the temperature sensor channel.
         let temp_sens_adc_counts: u16 = adc.read(&mut temperature_sensor).unwrap();
         // let pin_adc_counts: u16 = adc.read(&mut adc_pin_0).unwrap();
-        let button_a: u16 = if sw_a.is_low().unwrap() { 1 } else { 0 };
-        let mut buf = [0u8; 64];
-
+        let mut buf = [0u8; 32];
         arrform!(
             64,
-            "T:{} {} A: {}\r\n",
+            "T:{} {}\r\n",
             temp_sens_adc_counts,
             cal_temp(temp_sens_adc_counts),
-            button_a,
         )
         .as_bytes()
         .iter()
-        .take(64)
+        .take(32)
         .enumerate()
         .for_each(|(i, b)| {
             buf[i] = *b;
         });
+
         let mut wr_ptr = &buf[..buf.len()];
         // count bytes were written
         while !wr_ptr.is_empty() {
-            match serial.write(&wr_ptr) {
+            match serial.write(wr_ptr) {
                 Ok(len) => wr_ptr = &wr_ptr[len..],
                 // On error, just drop unwritten data.
                 // One possible error is Err(WouldBlock), meaning the USB

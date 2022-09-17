@@ -1,3 +1,5 @@
+//! Custom Display Model Trait for Mipidsi library for https://shop.pimoroni.com/products/pico-display-pack?variant=32368664215635
+
 use display_interface::{DataFormat, DisplayError, WriteOnlyDataCommand};
 // use embedded_graphics_core::{pixelcolor::Rgb565, prelude::IntoStorage};
 use embedded_graphics::pixelcolor;
@@ -5,10 +7,11 @@ use embedded_graphics::prelude::IntoStorage;
 use embedded_hal::{blocking::delay::DelayUs, digital::v2::OutputPin};
 
 // use mipidsi::no_pin::NoPin;
-use mipidsi::{instruction::Instruction, Error};
-use mipidsi::{DisplayOptions, Orientation};
-
-use super::{write_command, Model};
+use mipidsi::{
+    instruction::Instruction,
+    models::{write_command, Model},
+    DisplayOptions, Error, Orientation,
+};
 
 /// ST7789 SPI display with Reset pin
 /// Only SPI with DC pin interface is supported
@@ -16,7 +19,6 @@ pub struct PicoDisplay;
 
 impl Model for PicoDisplay {
     type ColorFormat = pixelcolor::Rgb565;
-    // type ColorFormat = pixelcolor::Bgr565;
 
     fn new() -> Self {
         Self
@@ -34,7 +36,6 @@ impl Model for PicoDisplay {
         DELAY: DelayUs<u32>,
         DI: WriteOnlyDataCommand,
     {
-        // let madctl = options.madctl() ^ 0b0000_1000; // this model has flipped RGB/BGR bit
         let madctl: u8 = options.madctl();
         match rst {
             Some(ref mut rst) => self.hard_reset(rst, delay)?,
@@ -80,8 +81,6 @@ impl Model for PicoDisplay {
 
     fn framebuffer_size(&self, orientation: Orientation) -> (u16, u16) {
         match orientation {
-            // Orientation::Portrait(_) | Orientation::PortraitInverted(_) => (240, 320),
-            // Orientation::Landscape(_) | Orientation::LandscapeInverted(_) => (320, 240),
             Orientation::Portrait(_) | Orientation::PortraitInverted(_) => (240, 320),
             Orientation::Landscape(_) | Orientation::LandscapeInverted(_) => (320, 240),
         }
